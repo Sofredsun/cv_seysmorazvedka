@@ -1,0 +1,64 @@
+{
+ "task": "inpainting",
+ "n_test": 400,
+ "seed": 42,
+ "rows": [
+  {
+   "name": "baseline_linear",
+   "k": "",
+   "up": "",
+   "r_mean": 0.10999986529350281,
+   "r_global": 0.10267448657227016,
+   "r_mean_tta": 0.10999986529350281,
+   "r_global_tta": 0.10267448657227016,
+   "adj_r": 0.9242348656376298,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.7379596249988394
+  },
+  {
+   "name": "inpainting_gan",
+   "k": 1,
+   "up": "transpose",
+   "path": "runs\\inpainting_gan\\best.pt",
+   "epoch": 3,
+   "full": false,
+   "r_mean": 0.3169107437133789,
+   "r_global": 0.32567499469085254,
+   "r_mean_tta": 0.32665520906448364,
+   "r_global_tta": 0.33533557956750326,
+   "adj_r": 0.9472095754213347,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.4810849800336444
+  },
+  {
+   "name": "inpainting_gan_adv0.1",
+   "k": 1,
+   "up": "transpose",
+   "path": "runs\\inpainting_gan_adv0.1\\best.pt",
+   "epoch": 1,
+   "full": false,
+   "r_mean": 0.2943687438964844,
+   "r_global": 0.30303587238620966,
+   "r_mean_tta": 0.3121090233325958,
+   "r_global_tta": 0.32088738418966556,
+   "adj_r": 0.9475346574163849,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.5502447049697698
+  },
+  {
+   "name": "inpainting_unet",
+   "k": 1,
+   "up": "transpose",
+   "path": "runs\\inpainting_unet\\best.pt",
+   "epoch": 54,
+   "full": false,
+   "r_mean": 0.3208428919315338,
+   "r_global": 0.33000416403735106,
+   "r_mean_tta": 0.33182698488235474,
+   "r_global_tta": 0.34167546436820834,
+   "adj_r": 0.948332632474629,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.43156305840169557
+  }
+ ]
+}
