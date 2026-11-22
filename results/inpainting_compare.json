@@ -59,6 +59,36 @@
    "adj_r": 0.948332632474629,
    "adj_r_ref": 0.9285028286692557,
    "std": 0.43156305840169557
+  },
+  {
+   "name": "inpainting_unet_up",
+   "k": 1,
+   "up": "upsample",
+   "path": "runs\\inpainting_unet_up\\best.pt",
+   "epoch": 59,
+   "full": false,
+   "r_mean": 0.2984359860420227,
+   "r_global": 0.3046137280855137,
+   "r_mean_tta": 0.3075411915779114,
+   "r_global_tta": 0.3141008866804349,
+   "adj_r": 0.9463874474191001,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.47610515529528347
+  },
+  {
+   "name": "inpainting_unet_up_k5",
+   "k": 5,
+   "up": "upsample",
+   "path": "runs\\inpainting_unet_up_k5\\best.pt",
+   "epoch": 62,
+   "full": false,
+   "r_mean": 0.3030966818332672,
+   "r_global": 0.3101192612778052,
+   "r_mean_tta": 0.3106265664100647,
+   "r_global_tta": 0.31762039782915724,
+   "adj_r": 0.9711010346773459,
+   "adj_r_ref": 0.9285028286692557,
+   "std": 0.4548982880675387
   }
  ]
 }
