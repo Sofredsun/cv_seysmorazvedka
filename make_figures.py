@@ -3,6 +3,9 @@
 python make_figures.py --task outpainting \
     --ckpt runs/outpainting_unet_up_k5/best.pt --hist runs/outpainting_unet_up_k5/hist.json \
     --hist_full runs/outpainting_unet_final/hist.json --restored results/outpainting_restored.npy
+python make_figures.py --task inpainting \
+    --ckpt runs/inpainting_unet/best.pt --hist runs/inpainting_unet/hist.json \
+    --hist_full runs/inpainting_unet_final/hist.json --restored results/inpainting_restored.npy
 
 Тестовые патчи - те же 400, что в compare.py (test-блок, seed 42); модель для них - отобранная по val
 (не --full: та видела test-строки). Восстановленный куб - результат финальной модели (infer.py).
@@ -15,6 +18,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Rectangle
 import torch
 
 import seismic_lib as sl
@@ -24,7 +28,17 @@ from train_unet import make_datasets
 # Срезы для показа реального пропуска: inline (axis0), z-срез, срез вдоль axis1 внутри пропуска
 VIEWS = {
     'outpainting': {'i0': 230, 'z': 400, 'j_hole': 470, 'edge_w': 96, 'test_idx': [7, 150, 333]},
+    # test_idx - окна с R U-Net на 15%, 50% и 85% квантилях по test-блоку; zoom - (j0, j1, z0, z1) вокруг пропуска
+    'inpainting': {'i0': 290, 'z': 230, 'j_hole': 474, 'test_idx': [157, 312, 355],
+                   'zoom': (300, 650, 130, 330), 'zoom_i0': [60, 290, 520]},
 }
+
+
+def _box(a, m2, color='r', lw=1):
+    """Контур прямоугольного пропуска m2 (lateral, z) на картинке img.T."""
+    rows, cols = np.where(m2.any(1))[0], np.where(m2.any(0))[0]
+    a.add_patch(Rectangle((rows[0] - .5, cols[0] - .5), len(rows), len(cols),
+                          fill=False, edgecolor=color, lw=lw))
 
 
 def _clim(a):
@@ -75,17 +89,21 @@ def fig_test_patches(task, cube, mask, norm, ckpt, idxs, out, device):
         lo, hi = _clim(y[0, 0].numpy())
         panels = [(inp, 'вход (пропуск = 0)'), (y[0, 0].numpy(), 'истина'),
                   (b[0, 0].numpy(), f'бейзлайн, R={r_b:.2f}'), (p[0, 0].numpy(), f'U-Net, R={r_p:.2f}')]
-        e = int(m[0, 0, :, 0].sum())
+        m2 = m[0, 0].numpy() > 0.5
         for c, (img, title) in enumerate(panels):
             a = ax[row, c]
             a.imshow(img.T, cmap='gray', vmin=lo, vmax=hi, aspect='auto')
-            a.axvline(img.shape[0] - e - .5, color='r', lw=1)
+            if task == 'inpainting':
+                _box(a, m2)
+            else:
+                a.axvline(img.shape[0] - int(m2[:, 0].sum()) - .5, color='r', lw=1)
             a.set_title(title, fontsize=10)
             a.set_xticks([])
             if c:
                 a.set_yticks([])
         ax[row, 0].set_ylabel(f'патч {i}: z')
-    fig.suptitle('test-блок: справа от красной линии - синтетический пропуск (24 трассы)')
+    fig.suptitle('test-блок: внутри красной рамки - синтетический пропуск 213 × 103' if task == 'inpainting'
+                 else 'test-блок: справа от красной линии - синтетический пропуск (24 трассы)')
     fig.tight_layout()
     fig.savefig(out, dpi=100)
     plt.close(fig)
@@ -94,7 +112,6 @@ def fig_test_patches(task, cube, mask, norm, ckpt, idxs, out, device):
 def fig_restored(task, cube, restored, mask, v, out):
     i0, z, j = v['i0'], v['z'], v['j_hole']
     n1 = cube.shape[1]
-    e = int(mask[0, :, 0].sum() // 2)
     lo, hi = _clim(cube[i0][~mask[i0]])
     fig, ax = plt.subplots(2, 3, figsize=(15, 8), gridspec_kw={'width_ratios': [1, 1, 1]})
     for row, (c, name) in enumerate([(cube, 'вход'), (restored, 'восстановлено')]):
@@ -104,10 +121,20 @@ def fig_restored(task, cube, restored, mask, v, out):
         ax[row, 1].set_title(f'{name}: срез z={z} (axis0 × axis1)')
         ax[row, 2].imshow(c[:, j, :].T, cmap='gray', vmin=lo, vmax=hi, aspect='auto')
         ax[row, 2].set_title(f'{name}: axis1={j}, в пропуске (axis0 × z)')
-        for a in ax[row, :2]:
-            a.axvline(e - .5, color='r', lw=.8)
-            a.axvline(n1 - e - .5, color='r', lw=.8)
-    fig.suptitle('реальный пропуск: красные линии - границы полос [0:24] и [457:481]')
+        if task == 'inpainting':
+            js, zs = np.where(mask[0].any(1))[0], np.where(mask[0].any(0))[0]
+            _box(ax[row, 0], mask[i0], lw=.8)
+            for jj in (js[0], js[-1] + 1):
+                ax[row, 1].axvline(jj - .5, color='r', lw=.8)
+            for zz in (zs[0], zs[-1] + 1):
+                ax[row, 2].axhline(zz - .5, color='r', lw=.8)
+        else:
+            e = int(mask[0, :, 0].sum() // 2)
+            for a in ax[row, :2]:
+                a.axvline(e - .5, color='r', lw=.8)
+                a.axvline(n1 - e - .5, color='r', lw=.8)
+    fig.suptitle('реальный пропуск [:, 368:581, 179:282] - красные линии/рамка' if task == 'inpainting'
+                 else 'реальный пропуск: красные линии - границы полос [0:24] и [457:481]')
     fig.tight_layout()
     fig.savefig(out, dpi=90)
     plt.close(fig)
@@ -126,6 +153,28 @@ def fig_edges(cube, restored, mask, v, out):
         a.axvline(line - .5, color='r', lw=1)
         a.set_title(title, fontsize=10)
     fig.suptitle(f'срез axis0={i0}, крайние {w} трасс (axis1 × z)')
+    fig.tight_layout()
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+
+
+def fig_zoom(cube, restored, mask, v, out):
+    """Inpainting: окрестность пропуска на нескольких срезах axis0, вход и восстановление."""
+    j0, j1, z0, z1 = v['zoom']
+    js, zs = np.where(mask[0].any(1))[0], np.where(mask[0].any(0))[0]
+    ii = v['zoom_i0']
+    fig, ax = plt.subplots(2, len(ii), figsize=(5 * len(ii), 8))
+    for c, i0 in enumerate(ii):
+        lo, hi = _clim(cube[i0][~mask[i0]])
+        for r, (src, name) in enumerate([(cube, 'вход'), (restored, 'восстановлено')]):
+            a = ax[r, c]
+            a.imshow(src[i0, j0:j1, z0:z1].T, cmap='gray', vmin=lo, vmax=hi, aspect='auto',
+                     extent=(j0 - .5, j1 - .5, z1 - .5, z0 - .5))
+            a.add_patch(Rectangle((js[0] - .5, zs[0] - .5), len(js), len(zs), fill=False, edgecolor='r', lw=1))
+            a.set_title(f'{name}: axis0={i0}', fontsize=10)
+            a.set_xlabel('axis1')
+        ax[0, c].set_ylabel('z')
+    fig.suptitle('окрестность пропуска крупно (axis1 × z)')
     fig.tight_layout()
     fig.savefig(out, dpi=100)
     plt.close(fig)
@@ -157,7 +206,10 @@ def main():
     fig_training(hist, hist_full, out / f'{t}_training.png')
     fig_test_patches(t, cube, mask, norm, args.ckpt, v['test_idx'], out / f'{t}_test_patches.png', device)
     fig_restored(t, cube, restored, mask, v, out / f'{t}_restored_views.png')
-    fig_edges(cube, restored, mask, v, out / f'{t}_edges.png')
+    if t == 'inpainting':
+        fig_zoom(cube, restored, mask, v, out / f'{t}_zoom.png')
+    else:
+        fig_edges(cube, restored, mask, v, out / f'{t}_edges.png')
     print('saved:', *sorted(p.name for p in out.glob(f'{t}_*.png')))
 
 
