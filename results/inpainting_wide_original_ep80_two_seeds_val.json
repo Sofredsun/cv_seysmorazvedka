@@ -1,0 +1,36 @@
+{
+  "split": "val",
+  "count": 400,
+  "seed": 42,
+  "baseline_checkpoints": [
+    "runs/inpainting_unet/best.pt",
+    "runs/inpainting_gan/best.pt",
+    "runs/inpainting_unet_up/best.pt"
+  ],
+  "wide_checkpoints": [
+    "runs/inpainting_unet_wide16_original_ep80/best.pt",
+    "runs/inpainting_unet_wide16_original_ep80_s23/best.pt"
+  ],
+  "results": {
+    "baseline": {
+      "pearson_mean_tta": 0.47092205286026,
+      "pearson_global_tta": 0.484507971189777
+    },
+    "wide_first": {
+      "pearson_mean_tta": 0.4066675305366516,
+      "pearson_global_tta": 0.41235890334131836
+    },
+    "wide_ensemble": {
+      "pearson_mean_tta": 0.42385682463645935,
+      "pearson_global_tta": 0.42955830615843826
+    },
+    "blend_first": {
+      "pearson_mean_tta": 0.4769018590450287,
+      "pearson_global_tta": 0.4876085054510441
+    },
+    "blend_two_seeds": {
+      "pearson_mean_tta": 0.4810614287853241,
+      "pearson_global_tta": 0.4916319687326758
+    }
+  }
+}
