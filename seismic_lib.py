@@ -159,10 +159,23 @@ class InpaintPatches(_PatchBase):
 
     def __init__(self, cube, real_mask, norm: Norm, rows0, patch_hw=(352, 192),
                  hole_hw=(213, 103), n_samples=4000, sources=('a0', 'a1'),
-                 augment=True, seed=0, fixed=False, k=1, stride=1):
+                 augment=True, seed=0, fixed=False, k=1, stride=1,
+                 context_z=None, dip_guided=False, depth_focus=0.0, paired=False):
         super().__init__(cube, real_mask, norm, rows0, n_samples, sources, augment, seed, fixed, k, stride)
         self.ph, self.pw = patch_hw
         self.hh, self.hw = hole_hw
+        self.context_z = context_z or self.pw
+        self.dip_guided = dip_guided
+        self.depth_focus = depth_focus
+        self.paired = paired
+        if paired:
+            self.pair_offsets = np.union1d(self.offs, self.offs + 1)
+            self.first_indices = np.searchsorted(self.pair_offsets, self.offs)
+            self.second_indices = np.searchsorted(self.pair_offsets, self.offs + 1)
+            self.centers = self.rows0[(self.rows0 + self.pair_offsets[0] >= self.rows0[0])
+                                      & (self.rows0 + self.pair_offsets[-1] <= self.rows0[-1])]
+        hole_depths = np.flatnonzero(real_mask[0].any(axis=0))
+        self.focus_start = int(hole_depths[0]) if len(hole_depths) else None
         # Допустимые старты окна по axis1, при которых окно целиком в чистой зоне
         cs = np.concatenate([[0], np.cumsum(self.bad1)])
         starts = np.arange(len(self.bad1) - self.ph + 1)
@@ -171,28 +184,53 @@ class InpaintPatches(_PatchBase):
     def _sample_stack(self, rng):
         src = self.sources[rng.integers(len(self.sources))]
         z0 = rng.integers(0, self.cube.shape[2] - self.pw + 1)
-        zs = slice(z0, z0 + self.pw)
+        if self.depth_focus and self.focus_start is not None and rng.random() < self.depth_focus:
+            target = self.focus_start - (self.pw - self.hw) // 2
+            z0 = int(np.clip(target + rng.integers(-12, 13), 0, self.cube.shape[2] - self.pw))
+        context_start = int(np.clip(z0 - (self.context_z - self.pw) // 2,
+                                    0, self.cube.shape[2] - self.context_z))
+        zs = slice(context_start, context_start + self.context_z)
         if src == 'a0':
-            i = rng.choice(self.rows0)
+            i = rng.choice(self.centers if self.paired else self.rows0)
             j0 = rng.choice(self.j0_ok)
-            return self.cube[self._idx0(i), j0:j0 + self.ph, zs]
+            rows = i + self.pair_offsets if self.paired else self._idx0(i)
+            return self.cube[rows, j0:j0 + self.ph, zs], z0 - context_start, (i, j0, context_start)
         j = rng.choice(self.clean1)
         lo, hi = self.rows0.min(), self.rows0.max() + 1
         i0 = rng.integers(lo, hi - self.ph + 1)
-        return self.cube[i0:i0 + self.ph, self._idx1(j), zs].transpose(1, 0, 2)
+        return (self.cube[i0:i0 + self.ph, self._idx1(j), zs].transpose(1, 0, 2),
+                z0 - context_start, None)
 
     def __getitem__(self, idx):
+        return self.sample(idx)
+
+    def sample(self, idx, *, with_location=False):
+        if with_location and (self.augment or tuple(self.sources) != ('a0',) or self.paired):
+            raise ValueError('sample coordinates require unaugmented axis0 patches')
         rng = self._rng(idx)
-        stack = self.norm.fwd(np.array(self._sample_stack(rng), dtype=np.float32))
+        stack, context_offset, origin = self._sample_stack(rng)
+        stack = self.norm.fwd(np.array(stack, dtype=np.float32))
         stack = self._augment(stack, rng)
         # Дыра: около центра со случайным смещением
         cy = (self.ph - self.hh) // 2 + rng.integers(-24, 25)
         cx = (self.pw - self.hw) // 2 + rng.integers(-16, 17)
         cy = int(np.clip(cy, 8, self.ph - self.hh - 8))
-        cx = int(np.clip(cx, 8, self.pw - self.hw - 8))
+        cx = int(np.clip(cx, 8, self.pw - self.hw - 8)) + context_offset
         m = np.zeros(stack.shape[1:], dtype=np.float32)
         m[cy:cy + self.hh, cx:cx + self.hw] = 1
-        return _pack(stack, m)
+        if self.paired:
+            x1, y1, mask = _pack(stack[self.first_indices], m)
+            x2, y2, _ = _pack(stack[self.second_indices], m)
+            return torch.stack((x1, x2)), torch.stack((y1, y2)), mask
+        x, y, mask = _pack(stack, m)
+        if self.dip_guided:
+            from inpainting import dip_fill
+            prior = dip_fill(x[len(stack) // 2].numpy(), m)
+            x = torch.cat((x, torch.from_numpy(prior[None])), dim=0)
+        if with_location:
+            row, lateral, depth = origin
+            return x, y, mask, (int(row), int(lateral + cy), int(depth + cx))
+        return x, y, mask
 
 
 class OutpaintPatches(_PatchBase):
@@ -300,34 +338,106 @@ class UNet(nn.Module):
 
 def model_config(ck: dict) -> dict:
     """Конфиг модели из чекпоинта (старые чекпоинты - без k/stride/up_mode)."""
+    for key, mode in (('axis1_band', 'axis1-band'), ('volume3d', 'volume3d'),
+                      ('residual_base', 'residual-base')):
+        if ck.get(key):
+            raise ValueError(f'Checkpoint uses the removed {mode} mode')
     return {'base': ck.get('base', 32), 'k': ck.get('k', 1), 'stride': ck.get('stride', 1),
-            'up_mode': ck.get('up_mode', 'transpose')}
+            'up_mode': ck.get('up_mode', 'transpose'),
+            'context_z': ck.get('context_z'), 'dip_guided': ck.get('dip_guided', False),
+            'wide_tunnel': ck.get('wide_tunnel', False), 'joint_members': ck.get('joint_members')}
 
 
 def load_model(path, device='cpu'):
     ck = torch.load(path, map_location=device)
     cfg = model_config(ck)
-    model = UNet(in_ch=cfg['k'] + 1, base=cfg['base'], up_mode=cfg['up_mode']).to(device)
-    model.load_state_dict(ck['state_dict'])
+    norm = Norm(*ck['norm'])
+    if cfg['joint_members']:
+        model = InpaintingEnsemble([
+            UNet(in_ch=2, base=member['base'], up_mode=member['up_mode'])
+            for member in cfg['joint_members']
+        ]).to(device)
+        model.load_state_dict(ck['state_dict'])
+    else:
+        model = UNet(in_ch=cfg['k'] + 1 + cfg['dip_guided'], base=cfg['base'],
+                     up_mode=cfg['up_mode'], depth=5 if cfg['wide_tunnel'] else 4).to(device)
+        model.load_state_dict(ck['state_dict'])
     model.eval()
-    return model, cfg, Norm(*ck['norm'])
+    return model, cfg, norm
+
+
+class InpaintingEnsemble(nn.Module):
+    def __init__(self, models):
+        super().__init__()
+        self.models = nn.ModuleList(models)
+
+    def forward(self, x):
+        return torch.stack([model(x) for model in self.models]).mean(0)
+
+
+def load_inpainting_ensemble(paths, device='cpu'):
+    members = [load_model(path, device) for path in paths]
+    model, norm = assemble_inpainting_ensemble(members)
+    return model, members[0][1], norm
+
+
+def assemble_inpainting_ensemble(members):
+    _, cfg, norm = members[0]
+    input_keys = ('k', 'stride', 'context_z', 'dip_guided', 'wide_tunnel')
+    if any(other_norm != norm or any(other_cfg[k] != cfg[k] for k in input_keys)
+           for _, other_cfg, other_norm in members[1:]):
+        raise ValueError('ensemble checkpoints require identical inputs and normalization')
+    return InpaintingEnsemble([model for model, _, _ in members]).eval(), norm
+
+
+def load_trainable_inpainting_ensemble(paths, device='cpu'):
+    members = [load_model(path, device) for path in paths]
+    for model, cfg, _ in members:
+        if (not isinstance(model, UNet) or cfg['k'] != 1 or cfg['stride'] != 1
+                or cfg['context_z'] not in (None, 192) or cfg['dip_guided'] or cfg['wide_tunnel']):
+            raise ValueError('joint training requires standard single-slice U-Net checkpoints')
+    model, norm = assemble_inpainting_ensemble(members)
+    configs = [{'base': cfg['base'], 'up_mode': cfg['up_mode']} for _, cfg, _ in members]
+    return model, configs, norm
 
 
 def composite(inp_known: torch.Tensor, pred: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return inp_known * (1 - mask) + pred * mask
 
 
+def slice_difference_loss(pred, target, mask):
+    """Match the amplitude change between two adjacent reconstructed slices."""
+    pred_delta = pred[:, 1] - pred[:, 0]
+    target_delta = target[:, 1] - target[:, 0]
+    return ((pred_delta - target_delta).abs() * mask).sum() / mask.sum().clamp_min(1)
+
+
 class HoleLoss(nn.Module):
     """
     L1 по пропуску + w_g * L1 разницы градиентов (по глубине и латерали) по пропуску.
 
-    Коэффициент корреляции в loss не используется -
-    R считается только как метрика (без градиента).
+    По умолчанию R считается только как метрика. Для inpainting можно
+    добавить корреляционный штраф по всему пропуску и его центру.
     """
 
-    def __init__(self, w_g=0.5):
+    def __init__(self, w_g=0.5, w_corr=0.0, w_center_corr=0.0):
         super().__init__()
         self.w_g = w_g
+        self.w_corr = w_corr
+        self.w_center_corr = w_center_corr
+
+    @staticmethod
+    def correlation_loss(pred, tgt, mask):
+        mask = mask.flatten(1)
+        count = mask.sum(1, keepdim=True)
+        pred, tgt = pred.flatten(1), tgt.flatten(1)
+        pred = (pred - (pred * mask).sum(1, keepdim=True) / count.clamp_min(1)) * mask
+        tgt = (tgt - (tgt * mask).sum(1, keepdim=True) / count.clamp_min(1)) * mask
+        covariance = (pred * tgt).sum(1)
+        # A variance floor keeps gradients finite for a flat prediction.
+        denominator = ((pred.square().sum(1) + 1e-4) * (tgt.square().sum(1) + 1e-4)).sqrt()
+        valid = count[:, 0] > 1
+        return ((1 - covariance / denominator) * valid).sum() / valid.sum().clamp_min(1)
 
     def forward(self, pred, tgt, m):
         n = m.sum().clamp_min(1)
@@ -336,12 +446,21 @@ class HoleLoss(nn.Module):
         gx = ((torch.diff(pred, dim=-2) - torch.diff(tgt, dim=-2)).abs() * m[..., 1:, :]).sum() / n
         with torch.no_grad():
             r = pearson_r_torch(pred, tgt, m).mean()
-        return l1 + self.w_g * (gz + gx), {'l1': l1.item(), 'r': r.item()}
+        loss = l1 + self.w_g * (gz + gx)
+        if self.w_corr:
+            loss = loss + self.w_corr * self.correlation_loss(pred, tgt, m)
+        if self.w_center_corr:
+            # Сужаем маску на 25 отсчетов с каждой стороны, как при расчете метрики в центре пропуска
+            outside = F.pad(1 - m, (25, 25, 25, 25), value=1)
+            outside = F.max_pool2d(outside, (1, 51), stride=1)
+            center = 1 - F.max_pool2d(outside, (51, 1), stride=1)
+            loss = loss + self.w_center_corr * self.correlation_loss(pred, tgt, center)
+        return loss, {'l1': l1.item(), 'r': r.item()}
 
 
 # Инференс на реальные пропуски
 @torch.no_grad()
-def _predict_windows(model, stacks, m, device, bs, tta_lateral):
+def _predict_windows(model, stacks, m, device, bs, tta_lateral, dip_guided=False, tta_neighbors=True):
     """stacks: (N, k, H, W) нормированные, m: (H, W) маска. Возвращает (N, H, W) предсказание."""
 
     out = np.empty((stacks.shape[0],) + stacks.shape[2:], dtype=np.float32)
@@ -349,10 +468,16 @@ def _predict_windows(model, stacks, m, device, bs, tta_lateral):
     for s in range(0, stacks.shape[0], bs):
         xs = torch.from_numpy(np.ascontiguousarray(stacks[s:s + bs])).to(device)
         x = torch.cat([xs * (1 - mt), mt.expand(xs.shape[0], 1, *mt.shape)], 1)
+        if dip_guided:
+            from inpainting import dip_fill
+            central = stacks[s:s + bs, xs.shape[1] // 2]
+            prior = np.stack([dip_fill(np.where(m, 0, plane), m) for plane in central])
+            x = torch.cat((x, torch.from_numpy(prior[:, None]).to(device)), dim=1)
         preds = [model(x)]
         # TTA: флип порядка соседних срезов (имеет смысл для k > 1)
-        if xs.shape[1] > 1:
-            xf = torch.cat([xs.flip(1) * (1 - mt), mt.expand(xs.shape[0], 1, *mt.shape)], 1)
+        if xs.shape[1] > 1 and tta_neighbors:
+            k = xs.shape[1]
+            xf = torch.cat((x[:, :k].flip(1), x[:, k:]), dim=1)
             preds.append(model(xf))
         # TTA: флип латерали - только если маска симметрична при флипе (inpainting)
         if tta_lateral:
@@ -361,10 +486,12 @@ def _predict_windows(model, stacks, m, device, bs, tta_lateral):
     return out
 
 
-def _stacks_axis0(cube_n, offs, js, zs):
+def _stacks_axis0(cube_n, offs, js, zs, rows=None):
     """Для каждого i: стопка соседей по axis0 (с отражением у границ) в окне (js, zs)."""
     n0 = cube_n.shape[0]
-    idx = np.arange(n0)[:, None] + offs[None]
+    if rows is None:
+        rows = np.arange(n0)
+    idx = rows[:, None] + offs[None]
     idx = np.where(idx < 0, -idx, idx)
     idx = np.where(idx >= n0, 2 * (n0 - 1) - idx, idx)
     win = cube_n[:, js, zs]
@@ -372,24 +499,44 @@ def _stacks_axis0(cube_n, offs, js, zs):
 
 
 def restore_cube(task, cube, model, cfg, norm: Norm, device='cuda', bs=8, tta=True,
-                 patch_hw=(352, 192), width=128) -> np.ndarray:
+                 patch_hw=(352, 192), width=128, mask=None) -> np.ndarray:
     """Заполняет реальные пропуски куба. Известные значения не меняются (бит-в-бит)."""
-    mask = hole_mask(task, cube.shape)
+    if mask is None:
+        mask = hole_mask(task, cube.shape)
+    if cfg.get('wide_tunnel'):
+        if task != 'inpainting':
+            raise ValueError('wide-tunnel checkpoint requires inpainting')
+        from inpainting_wide import PATCH
+        patch_hw = PATCH
     offs = neighbor_offsets(cfg['k'], cfg['stride'])
-    cube_n = norm.fwd(cube.astype(np.float32))
     restored = cube.copy()
     if task == 'inpainting':
+        patch_hw = (patch_hw[0], cfg.get('context_z') or patch_hw[1])
         js_hole, zs_hole = np.where(mask[0].any(1))[0], np.where(mask[0].any(0))[0]
         h, w = len(js_hole), len(zs_hole)
         j0 = js_hole[0] - (patch_hw[0] - h) // 2
         z0 = zs_hole[0] - (patch_hw[1] - w) // 2
+        if cfg.get('wide_tunnel'):
+            j0 = int(np.clip(j0, 0, cube.shape[1] - patch_hw[0]))
+            z0 = int(np.clip(z0, 0, cube.shape[2] - patch_hw[1]))
         js, zs = slice(j0, j0 + patch_hw[0]), slice(z0, z0 + patch_hw[1])
-        stacks = _stacks_axis0(cube_n, offs, js, zs)
+        crop = norm.fwd(cube[:, js, zs].astype(np.float32, copy=False))
         m = mask[0, js, zs]
-        pred = _predict_windows(model, stacks, m, device, bs, tta_lateral=tta)
+        wide = cfg.get('wide_tunnel', False)
+        context_mask = m
+        if wide:
+            actual = hole_mask(task, (1, *cube.shape[1:]))[0, js, zs]
+            context_mask = m | actual
         win = restored[:, js, zs]
-        win[:, m] = norm.inv(pred[:, m])
+        for start in range(0, len(crop), bs):
+            rows = np.arange(start, min(start + bs, len(crop)))
+            stacks = _stacks_axis0(crop, offs, slice(None), slice(None), rows=rows)
+            pred = _predict_windows(model, stacks, context_mask, device, bs, tta_lateral=tta,
+                                    dip_guided=cfg.get('dip_guided', False), tta_neighbors=not wide)
+            filled = norm.inv(pred[:, m])
+            win[start:start + len(rows)][:, m] = np.clip(filled, 0, 1) if wide else filled
     elif task == 'outpainting':
+        cube_n = norm.fwd(cube.astype(np.float32))
         e = int(mask[0, :, 0].sum() // 2)
         n1 = cube.shape[1]
         # Правый край: окно [n1-width, n1), скрыты последние e трасс

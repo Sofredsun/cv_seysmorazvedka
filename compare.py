@@ -104,59 +104,101 @@ def main():
     ap.add_argument('--bs', type=int, default=16)
     ap.add_argument('--no_cube', action='store_true', help='не считать adjR/std на реальном пропуске')
     ap.add_argument('--out', default=None, help='по умолчанию results/<task>_compare.json')
+    ap.add_argument('--split', choices=['val', 'test'], default='test')
+    ap.add_argument('--spearman', action='store_true', help='report rank metrics for inpainting')
+    ap.add_argument('--ensemble', nargs='+', metavar='CKPT', help='also evaluate an equal-weight ensemble')
     args = ap.parse_args()
+    if args.spearman and args.task != 'inpainting':
+        ap.error('--spearman is available for inpainting')
+    if args.ensemble and (args.task != 'inpainting' or len(args.ensemble) < 2):
+        ap.error('--ensemble requires inpainting and at least two checkpoints')
+    if args.spearman:
+        from inpainting import Spearman
 
     sl.seed_everything(args.seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cube = sl.load_cube(args.task)
     mask = sl.hole_mask(args.task, cube.shape)
     norm = sl.fit_norm(cube, mask)
-    ckpts = args.ckpts or sorted(glob.glob(f'runs/{args.task}_*/best.pt') + glob.glob(f'runs/{args.task}_*/final.pt'))
+    ckpts = args.ckpts if args.ckpts is not None else (
+        [] if args.ensemble else sorted(glob.glob(f'runs/{args.task}_*/best.pt')
+                                        + glob.glob(f'runs/{args.task}_*/final.pt')))
 
     loaders = {}
 
-    def test_loader(k, stride):
-        if (k, stride) not in loaders:
-            te = make_datasets(args.task, cube, mask, norm, 1, args.n_test, args.seed, k=k, stride=stride)[2]
-            loaders[(k, stride)] = DataLoader(te, batch_size=args.bs)
-        return loaders[(k, stride)]
+    def eval_loader(k, stride, context_z=None, dip_guided=False):
+        key = (k, stride, context_z, dip_guided)
+        if key not in loaders:
+            datasets = make_datasets(args.task, cube, mask, norm, 1, args.n_test, args.seed,
+                                     k=k, stride=stride, context_z=context_z, dip_guided=dip_guided)
+            loaders[key] = DataLoader(datasets[1 if args.split == 'val' else 2], batch_size=args.bs)
+        return loaders[key]
 
     # Одни и те же test-патчи для разных k: центральный срез и маска совпадают
-    _, y1, m1 = next(iter(test_loader(1, 1)))
-    _, y5, m5 = next(iter(test_loader(5, 2)))
+    _, y1, m1 = next(iter(eval_loader(1, 1)))
+    _, y5, m5 = next(iter(eval_loader(5, 2)))
     assert torch.equal(y1, y5) and torch.equal(m1, m5), 'test-патчи различаются для разных k'
 
     rows = []
-    # --- бейзлайн
+    # Бейзлайн
     acc = RAcc()
-    for _, y, m in test_loader(1, 1):
-        acc.add(baseline_pred(args.task, y, m), y, m)
+    ranks = Spearman(diagnostics=True) if args.spearman else None
+    for _, y, m in eval_loader(1, 1):
+        p = baseline_pred(args.task, y, m)
+        acc.add(p, y, m)
+        if ranks is not None:
+            ranks.add(p, y, m)
     rm, rg = acc.result()
     row = {'name': 'baseline_' + ('linear' if args.task == 'inpainting' else 'nearest'),
            'k': '', 'up': '', 'r_mean': rm, 'r_global': rg, 'r_mean_tta': rm, 'r_global_tta': rg}
     if not args.no_cube:
         row['adj_r'], row['adj_r_ref'], row['std'] = shape_stats(args.task, baseline_restore(args.task, cube, mask))
+    if ranks is not None:
+        row.update(ranks.result())
     rows.append(row)
     print(row, flush=True)
 
-    # --- модели
-    for path in ckpts:
-        ck = torch.load(path, map_location='cpu')
-        model, cfg, _ = sl.load_model(path, device)
-        name = str(Path(path).parent.name) + ('/final' if Path(path).stem == 'final' else '')
-        row = {'name': name, 'k': cfg['k'], 'up': cfg['up_mode'], 'path': path,
-               'epoch': ck.get('epoch'), 'full': bool(ck.get('full', False))}
+    # Модели
+    entries = ckpts + ([args.ensemble] if args.ensemble else [])
+    for entry in entries:
+        if isinstance(entry, list):
+            members = [torch.load(path, map_location='cpu') for path in entry]
+            model, cfg, model_norm = sl.load_inpainting_ensemble(entry, device)
+            row = {'name': 'ensemble', 'k': cfg['k'], 'up': 'mixed', 'paths': entry,
+                   'epoch': '', 'full': any(ck.get('full', False) for ck in members)}
+        else:
+            ck = torch.load(entry, map_location='cpu')
+            model, cfg, model_norm = sl.load_model(entry, device)
+            name = str(Path(entry).parent.name) + ('/final' if Path(entry).stem == 'final' else '')
+            row = {'name': name, 'k': cfg['k'], 'up': 'mixed' if cfg['joint_members'] else cfg['up_mode'],
+                   'path': entry,
+                   'epoch': ck.get('epoch'), 'full': bool(ck.get('full', False))}
+        if cfg['wide_tunnel']:
+            print(f"Skipping {row['name']}: use inpainting_wide_compare.py for matched tunnel evaluation.", flush=True)
+            continue
         if not row['full']:
+            loader = eval_loader(cfg['k'], cfg['stride'], cfg['context_z'], cfg['dip_guided'])
             for tta in (False, True):
                 acc = RAcc()
-                for x, y, m in test_loader(cfg['k'], cfg['stride']):
+                ranks = Spearman(diagnostics=True) if args.spearman else None
+                prior = Spearman(diagnostics=True) if args.spearman and cfg['dip_guided'] and not tta else None
+                for x, y, m in loader:
+                    if prior is not None:
+                        prior.add(x[:, -1:], y, m)
                     x, y, m = x.to(device), y.to(device), m.to(device)
-                    acc.add(model_pred(model, x, args.task, cfg['k'], tta), y, m)
+                    p = model_pred(model, x, args.task, cfg['k'], tta)
+                    acc.add(p, y, m)
+                    if ranks is not None:
+                        ranks.add(p, y, m)
                 rm, rg = acc.result()
                 sfx = '_tta' if tta else ''
                 row['r_mean' + sfx], row['r_global' + sfx] = rm, rg
+                if ranks is not None:
+                    row.update({name + sfx: value for name, value in ranks.result().items()})
+                if prior is not None:
+                    row.update({'dip_prior_' + name: value for name, value in prior.result().items()})
         if not args.no_cube:
-            restored = sl.restore_cube(args.task, cube, model, cfg, norm, device=device, tta=True)
+            restored = sl.restore_cube(args.task, cube, model, cfg, model_norm, device=device, tta=True)
             row['adj_r'], row['adj_r_ref'], row['std'] = shape_stats(args.task, restored)
             del restored
         rows.append(row)
@@ -168,16 +210,26 @@ def main():
     def f(v):
         return f'{v:.4f}' if isinstance(v, float) else '—'
 
-    print(f'\n### {args.task}: test-блок ({args.n_test} синтетических пропусков) + форма заливки реального пропуска\n')
-    print('| модель | k | up | R_mean | R_global | R_mean TTA | R_global TTA | adjR пропуск | adjR данные | std (≈1) |')
+    print(f'\n### {args.task}: {args.split}-блок ({args.n_test} синтетических пропусков)\n')
+    print('| модель | k | up | R_mean | R_global | R_mean TTA | R_global TTA | adjR пропуск | adjR данные | std |')
     print('|---|---|---|---|---|---|---|---|---|---|')
     for r in rows:
         print(f"| {r['name']} | {r['k']} | {r['up']} | {f(r.get('r_mean'))} | {f(r.get('r_global'))} | "
               f"{f(r.get('r_mean_tta'))} | {f(r.get('r_global_tta'))} | {f(r.get('adj_r'))} | {f(r.get('adj_r_ref'))} | {f(r.get('std'))} |")
 
+    if args.spearman:
+        print('\n| Model | Spearman global | Global TTA | Mean TTA | Center mean TTA | Dip prior global |')
+        print('|---|---:|---:|---:|---:|---:|')
+        for r in rows:
+            mean_tta = r.get('spearman_mean_tta', r.get('spearman_mean'))
+            center_tta = r.get('spearman_center_mean_tta', r.get('spearman_center_mean'))
+            print(f"| {r['name']} | {f(r.get('spearman_global'))} | "
+                  f"{f(r.get('spearman_global_tta', r.get('spearman_global')))} | "
+                  f"{f(mean_tta)} | {f(center_tta)} | {f(r.get('dip_prior_spearman_global'))} |")
+
     out = Path(args.out or f'results/{args.task}_compare.json')
     out.parent.mkdir(parents=True, exist_ok=True)
-    json.dump({'task': args.task, 'n_test': args.n_test, 'seed': args.seed, 'rows': rows},
+    json.dump({'task': args.task, 'split': args.split, 'n_test': args.n_test, 'seed': args.seed, 'rows': rows},
               open(out, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
     print('\nsaved', out)
 
