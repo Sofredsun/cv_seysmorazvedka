@@ -14,6 +14,8 @@ def main():
     source = ap.add_mutually_exclusive_group(required=True)
     source.add_argument('--ckpt')
     source.add_argument('--ensemble', nargs='+', metavar='CKPT')
+    source.add_argument('--inpainting-bundle', metavar='CKPT',
+                        help='single checkpoint containing both groups of the 50/50 blend')
     ap.add_argument('--blend-wide', nargs=2, metavar='CKPT',
                     help='mix the original ensemble 50/50 with a two-model wide ensemble')
     ap.add_argument('--out', required=True)
@@ -24,28 +26,35 @@ def main():
         ap.error('--ensemble requires inpainting and at least two checkpoints')
     if args.blend_wide and not args.ensemble:
         ap.error('--blend-wide requires --ensemble')
+    if args.inpainting_bundle and args.task != 'inpainting':
+        ap.error('--inpainting-bundle requires inpainting')
     if args.bs < 1:
         ap.error('--bs must be positive')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cube = sl.load_cube(args.task)
     mask = sl.hole_mask(args.task, cube.shape)
-    if args.ensemble:
+    if args.inpainting_bundle:
+        (model, cfg, norm), (wide, wide_cfg, wide_norm) = sl.load_inpainting_bundle(
+            args.inpainting_bundle, device)
+    elif args.ensemble:
         model, cfg, norm = sl.load_inpainting_ensemble(args.ensemble, device)
     else:
         model, cfg, norm = sl.load_model(args.ckpt, device)
     print('config', cfg, 'norm', norm, flush=True)
     if args.blend_wide:
         wide, wide_cfg, wide_norm = sl.load_inpainting_ensemble(args.blend_wide, device)
+    blend = bool(args.blend_wide or args.inpainting_bundle)
+    if blend:
         if cfg['k'] != 1 or cfg['context_z'] not in (None, 192) or cfg['dip_guided']:
-            ap.error('--blend-wide requires a standard single-slice baseline ensemble')
+            ap.error('the inpainting blend requires a standard single-slice baseline ensemble')
         if not wide_cfg['wide_tunnel'] or wide_norm != norm:
-            ap.error('--blend-wide requires wide-tunnel checkpoints with matching normalization')
+            ap.error('the inpainting blend requires wide-tunnel checkpoints with matching normalization')
 
     t0 = time.time()
     restored = sl.restore_cube(args.task, cube, model, cfg, norm, device=device,
                                bs=args.bs, tta=not args.no_tta)
-    if args.blend_wide:
+    if blend:
         original_fill = restored[mask]
         del restored
         print('Baseline ensemble finished; reconstructing with both wide models', flush=True)
@@ -61,7 +70,7 @@ def main():
     assert np.isfinite(restored).all(), 'NaN/inf в результате'
     assert np.array_equal(restored[~mask], cube[~mask]), 'известные значения изменены'
     filled = restored[mask]
-    if args.blend_wide:
+    if blend:
         assert np.all(filled != 0), 'в пропуске остались нули'
     known = cube[~mask][::97]
     print(f'OK: shape {restored.shape}, hole voxels {mask.sum()}, '

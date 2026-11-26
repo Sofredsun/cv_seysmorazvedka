@@ -256,7 +256,7 @@ python train_unet.py --task inpainting --wide-tunnel --wide-augment --edge-test-
 | `models/inpainting_history.json`                               | история обучения обеих моделей                                                                                                   |
 | `results/inpainting_restored.npy`                              | восстановленный куб 580 × 951 × 462, 1019 МБ, SHA-256 `0c7cd9af…a500e01c`. В git не хранится, создается ноутбуком или `infer.py` |
 
-Для повторного запуска `inpainting_result.ipynb` из корня репозитория нужны исходный куб `data/inpainting_cube_missed_data.npy` и пять чекпойнтов, указанных в [командах воспроизведения итоговой смеси](#воспроизведение-итоговой-смеси-inpainting). Результаты и иллюстрации уже сохранены в ноутбуке.
+Для повторного запуска `inpainting_result.ipynb` из корня репозитория нужны исходный куб `data/inpainting_cube_missed_data.npy` и файл `models/inpainting_ensemble.pt` либо пять отдельных чекпойнтов из [команд воспроизведения итоговой смеси](#воспроизведение-итоговой-смеси-inpainting). Результаты и иллюстрации уже сохранены в ноутбуке.
 
 
 ## 4. Как воспроизвести
@@ -282,6 +282,12 @@ python infer.py --task inpainting --ckpt runs/inpainting_unet_final/final.pt --o
 Одна эпоха outpainting занимает 39-40 с, весь прогон из 40 эпох примерно 26 мин. Эпоха inpainting по 80 с, прогон из 80 эпох где-то 1 ч 50 мин.
 
 ### Воспроизведение итоговой смеси inpainting
+
+Если у вас есть файл модели для сдачи `inpainting_ensemble.pt`, поместите его в `models/`. В нём собраны веса всех пяти участников смеси. Ноутбук `inpainting_result.ipynb` автоматически использует этот файл. Чтобы выполнить только инференс из корня репозитория:
+
+```powershell
+python -u infer.py --task inpainting --inpainting-bundle models/inpainting_ensemble.pt --bs 4 --out results/inpainting_restored_original_ep80_two_seeds.npy
+```
 
 После обучения базовых односрезовых U-Net командами выше обучите GAN и две `_wide16` на исходном разбиении. В смеси используются чекпойнты `best.pt`, выбранные по валидации. Для двух `_wide16` это эпохи 59 и 63.
 

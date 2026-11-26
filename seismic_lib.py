@@ -349,7 +349,10 @@ def model_config(ck: dict) -> dict:
 
 
 def load_model(path, device='cpu'):
-    ck = torch.load(path, map_location=device)
+    return _load_model_checkpoint(torch.load(path, map_location=device), device)
+
+
+def _load_model_checkpoint(ck, device):
     cfg = model_config(ck)
     norm = Norm(*ck['norm'])
     if cfg['joint_members']:
@@ -379,6 +382,22 @@ def load_inpainting_ensemble(paths, device='cpu'):
     members = [load_model(path, device) for path in paths]
     model, norm = assemble_inpainting_ensemble(members)
     return model, members[0][1], norm
+
+
+def load_inpainting_bundle(path, device='cpu'):
+    """Load the two ensembles used for the 50/50 inpainting blend."""
+    bundle = torch.load(path, map_location='cpu', weights_only=True)
+    if bundle.get('format') != 'inpainting-blend-v1':
+        raise ValueError('Expected an inpainting blend checkpoint')
+    baseline, wide = bundle['baseline'], bundle['wide']
+    if len(baseline) != 3 or len(wide) != 2:
+        raise ValueError('The checkpoint must contain three single-slice and two wide models')
+    groups = []
+    for checkpoints in (baseline, wide):
+        members = [_load_model_checkpoint(ck, device) for ck in checkpoints]
+        model, norm = assemble_inpainting_ensemble(members)
+        groups.append((model, members[0][1], norm))
+    return tuple(groups)
 
 
 def assemble_inpainting_ensemble(members):
