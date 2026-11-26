@@ -256,7 +256,7 @@ python train_unet.py --task inpainting --wide-tunnel --wide-augment --edge-test-
 | `models/inpainting_history.json`                               | история обучения обеих моделей                                                                                                   |
 | `results/inpainting_restored.npy`                              | восстановленный куб 580 × 951 × 462, 1019 МБ, SHA-256 `0c7cd9af…a500e01c`. В git не хранится, создается ноутбуком или `infer.py` |
 
-Для повторного запуска `notebooks/inpainting_result.ipynb` нужны исходный куб `data/inpainting_cube_missed_data.npy` и файл `models/inpainting_ensemble.pt` либо пять отдельных чекпойнтов из [команд воспроизведения итоговой смеси](#воспроизведение-итоговой-смеси-inpainting). Результаты и иллюстрации уже сохранены в ноутбуке.
+Для повторного запуска `notebooks/inpainting_result.ipynb` положите исходный куб в `data/inpainting_cube_missed_data.npy`. Ноутбук загружает [готовые чекпойнты из `models/`](#воспроизведение-итоговой-смеси-inpainting) или единый файл `models/inpainting_ensemble.pt`, если он приложен к сдаче. Результаты и иллюстрации уже сохранены в ноутбуке.
 
 
 ## 4. Как воспроизвести
@@ -283,13 +283,29 @@ python infer.py --task inpainting --ckpt runs/inpainting_unet_final/final.pt --o
 
 ### Воспроизведение итоговой смеси inpainting
 
-Если у вас есть файл модели для сдачи `inpainting_ensemble.pt`, поместите его в `models/`. В нём собраны веса всех пяти участников смеси. Ноутбук `notebooks/inpainting_result.ipynb` автоматически использует этот файл. Чтобы выполнить только инференс из корня репозитория:
+Пять готовых чекпойнтов находятся в `models/`. После клонирования репозитория и добавления исходного куба можно открыть [ноутбук](notebooks/inpainting_result.ipynb) или выполнить оценку и инференс в PowerShell из корня проекта. Три односрезовых модели дают половину прогноза, среднее двух `_wide16` дает вторую половину.
+
+```powershell
+$baseline = @(
+    'models/inpainting_model_holdout.pt'
+    'models/inpainting_ensemble/gan.pt'
+    'models/inpainting_ensemble/unet_up.pt'
+)
+$wide = @(
+    'models/inpainting_ensemble/wide16_s19.pt'
+    'models/inpainting_ensemble/wide16_s23.pt'
+)
+python -u inpainting_wide_compare.py --split test --baseline @baseline --wide @wide --count 400 --seed 42 --bs 4 --out runs/inpainting_wide_published_test.json
+python -u infer.py --task inpainting --ensemble @baseline --blend-wide @wide --bs 4 --out results/inpainting_restored_original_ep80_two_seeds.npy
+```
+
+Единый файл для сдачи `inpainting_ensemble.pt` содержит эти же веса. Если поместить его в `models/`, ноутбук выберет его автоматически. Команда инференса для этого файла:
 
 ```powershell
 python -u infer.py --task inpainting --inpainting-bundle models/inpainting_ensemble.pt --bs 4 --out results/inpainting_restored_original_ep80_two_seeds.npy
 ```
 
-После обучения базовых односрезовых U-Net командами выше обучите GAN и две `_wide16` на исходном разбиении. В смеси используются чекпойнты `best.pt`, выбранные по валидации. Для двух `_wide16` это эпохи 59 и 63.
+Для переобучения после базовых односрезовых U-Net запустите GAN и две `_wide16` на исходном разбиении. Чекпойнты `best.pt` сохраняются в `runs/`. У опубликованных `_wide16` выбраны эпохи 59 и 63.
 
 ```powershell
 python -u train_gan.py --task inpainting --epochs 20 --lam_adv 0.01
@@ -297,21 +313,7 @@ python -u train_unet.py --task inpainting --wide-tunnel --wide-augment --k 5 --b
 python -u train_unet.py --task inpainting --wide-tunnel --wide-augment --k 5 --base 16 --bs 4 --epochs 80 --n_train 1600 --n_val 152 --lr 0.001 --seed 23 --tag _wide16_original_ep80_s23
 ```
 
-Тест и восстановление куба используют одни и те же пять весов. Три односрезовые модели дают половину прогноза, среднее двух `_wide16` дает вторую половину.
-
-```powershell
-$baseline = @(
-    'runs/inpainting_unet/best.pt'
-    'runs/inpainting_gan/best.pt'
-    'runs/inpainting_unet_up/best.pt'
-)
-$wide = @(
-    'runs/inpainting_unet_wide16_original_ep80/best.pt'
-    'runs/inpainting_unet_wide16_original_ep80_s23/best.pt'
-)
-python -u inpainting_wide_compare.py --split test --baseline @baseline --wide @wide --count 400 --seed 42 --bs 4 --out results/inpainting_wide_original_ep80_two_seeds_test.json
-python -u infer.py --task inpainting --ensemble @baseline --blend-wide @wide --bs 4 --out results/inpainting_restored_original_ep80_two_seeds.npy
-```
+Чтобы проверить новые веса, подставьте пути к их `best.pt` из `runs/` в массивы `$baseline` и `$wide` и укажите новые имена выходных файлов.
 
 
 | файл              | что делает                                                                          |
