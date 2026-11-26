@@ -141,14 +141,14 @@ R этого прогона на контрольной выборке (~0.64) �
 #### Файлы для сдачи (outpainting)
 | файл                                  | что это                                                                                                                                  |
 |---------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `outpainting_result.ipynb`            | ноутбук по шаблону курса: данные -> модель -> обучение -> тест -> инференс -> сохранение. Код самодостаточный, `seismic_lib.py` не нужен |
+| [`outpainting_result.ipynb`](notebooks/outpainting_result.ipynb)            | ноутбук по шаблону курса: данные -> модель -> обучение -> тест -> инференс -> сохранение. Код самодостаточный, `seismic_lib.py` не нужен |
 | `models/outpainting_model.pt`         | **финальная модель** (веса + `k`, `stride`, `base`, `up_mode`, `norm`), 35 МБ                                                            |
 | `models/outpainting_model_holdout.pt` | та же модель, обученная только на train, — для честной оценки на test в ноутбуке                                                         |
 | `models/outpainting_history.json`     | история обучения обеих моделей (графики в ноутбуке)                                                                                      |
 | `SeismicUtils.py`                     | визуализация из материалов курса                                                                                                         |
 | `results/outpainting_restored.npy`    | восстановленный куб 460 × 481 × 800, 708 МБ, SHA-256 `1ef4da86…382b58`. В git не хранится, создается ноутбуком или `infer.py`            |
 
-Для запуска ноутбука нужен `data/outpainting_cube_missed_data.npy` рядом с ним. По умолчанию `RETRAIN = False`: веса берутся из `models/`, ноутбук выполняется за полторы минуты
+Для запуска ноутбука нужен `data/outpainting_cube_missed_data.npy` в корне проекта. По умолчанию `RETRAIN = False`: веса берутся из `models/`, ноутбук выполняется за полторы минуты
 
 ### 3.2 Inpainting
 
@@ -249,14 +249,14 @@ python train_unet.py --task inpainting --wide-tunnel --wide-augment --edge-test-
 #### Файлы для сдачи (inpainting)
 | файл                                                           | что это                                                                                                                          |
 |----------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
-| [`inpainting_result.ipynb`](inpainting_result.ipynb)             | исходный U-Net, путь к итоговой смеси, кривые обучения, тест на 400 пропусках, визуализации и сборка куба                         |
+| [`inpainting_result.ipynb`](notebooks/inpainting_result.ipynb)             | исходный U-Net, путь к итоговой смеси, кривые обучения, тест на 400 пропусках, визуализации и сборка куба                         |
 | `results/inpainting_restored_original_ep80_two_seeds.npy`      | куб, восстановленный итоговой смесью. Создается ноутбуком или [командой инференса](#воспроизведение-итоговой-смеси-inpainting).  |
 | `models/inpainting_model.pt`                                   | исходный односрезовый U-Net для инференса, обученный на всём кубе, 31 МБ |
 | `models/inpainting_model_holdout.pt`                           | исходный односрезовый U-Net, обученный только на train для оценки на test |
 | `models/inpainting_history.json`                               | история обучения обеих моделей                                                                                                   |
 | `results/inpainting_restored.npy`                              | восстановленный куб 580 × 951 × 462, 1019 МБ, SHA-256 `0c7cd9af…a500e01c`. В git не хранится, создается ноутбуком или `infer.py` |
 
-Для повторного запуска `inpainting_result.ipynb` из корня репозитория нужны исходный куб `data/inpainting_cube_missed_data.npy` и файл `models/inpainting_ensemble.pt` либо пять отдельных чекпойнтов из [команд воспроизведения итоговой смеси](#воспроизведение-итоговой-смеси-inpainting). Результаты и иллюстрации уже сохранены в ноутбуке.
+Для повторного запуска `notebooks/inpainting_result.ipynb` нужны исходный куб `data/inpainting_cube_missed_data.npy` и файл `models/inpainting_ensemble.pt` либо пять отдельных чекпойнтов из [команд воспроизведения итоговой смеси](#воспроизведение-итоговой-смеси-inpainting). Результаты и иллюстрации уже сохранены в ноутбуке.
 
 
 ## 4. Как воспроизвести
@@ -283,7 +283,7 @@ python infer.py --task inpainting --ckpt runs/inpainting_unet_final/final.pt --o
 
 ### Воспроизведение итоговой смеси inpainting
 
-Если у вас есть файл модели для сдачи `inpainting_ensemble.pt`, поместите его в `models/`. В нём собраны веса всех пяти участников смеси. Ноутбук `inpainting_result.ipynb` автоматически использует этот файл. Чтобы выполнить только инференс из корня репозитория:
+Если у вас есть файл модели для сдачи `inpainting_ensemble.pt`, поместите его в `models/`. В нём собраны веса всех пяти участников смеси. Ноутбук `notebooks/inpainting_result.ipynb` автоматически использует этот файл. Чтобы выполнить только инференс из корня репозитория:
 
 ```powershell
 python -u infer.py --task inpainting --inpainting-bundle models/inpainting_ensemble.pt --bs 4 --out results/inpainting_restored_original_ep80_two_seeds.npy
